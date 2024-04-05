@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import mlflow
+import mlflow.pytorch
 
 from src.environments import EnvironmentGraph
 
@@ -82,18 +84,25 @@ def prepare_data(environment):
 def train_model(model, node_features, adjacency_matrices, labels, epochs=100, lr=0.1):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        output = model(node_features, adjacency_matrices)
-        loss = criterion(output, labels)
-        loss.backward()
-        optimizer.step()
-        if epoch % 10 == 0:
-            print(f'Epoch {epoch + 1}, Loss: {loss.item()}')
+    with mlflow.start_run():
+        mlflow.log_params({"epochs": epochs, "lr": lr})
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            output = model(node_features, adjacency_matrices)
+            loss = criterion(output, labels)
+            loss.backward()
+            optimizer.step()
+            mlflow.log_metric("loss", loss.item(), step=epoch)
+            if epoch % 10 == 0:
+                print(f'Epoch {epoch + 1}, Loss: {loss.item()}')
+        mlflow.pytorch.log_model(model, "models")
 
 
 # Create and train the GCN model
 if __name__ == "__main__":
+    mlflow.set_tracking_uri("http://192.168.1.94:8080")  # Set your MLflow tracking URI
+    mlflow.set_experiment("ecosystem_graphs")  # Set your MLflow experiment name
+
     environment = EnvironmentGraph()
 
 
@@ -131,4 +140,7 @@ if __name__ == "__main__":
     output_dim = 2  # Define output dimension (binary classification)
     model = GCN(input_dim, hidden_dim, output_dim)
     train_model(model, node_features, adjacency_matrices, labels)
-    print('hello')
+
+    mlflow.pytorch.log_model(model, "models")
+
+    mlflow.end_run()
