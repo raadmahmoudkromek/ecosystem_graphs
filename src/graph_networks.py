@@ -1,16 +1,10 @@
-#  Copyright (c) 2024. Kromek Group Ltd.
-import random
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
 import mlflow
-import mlflow.pytorch
+import numpy as np
+import torch
+import wandb
+from torch import nn as nn, optim as optim
 
-from src.environments import EnvironmentGraph
-
-from src.attribute_enums import Size, Classification, Diet, Species, Relationships
+from src.attribute_enums import Relationships
 
 
 class GCN(nn.Module):
@@ -26,7 +20,6 @@ class GCN(nn.Module):
         x = self.relu(self.gc2(x, adj))
         x = self.gc3(x, adj)
         return x
-
 
 
 class GraphConvolution(nn.Module):
@@ -76,12 +69,14 @@ def prepare_data(environment):
 
     node_features = torch.tensor(node_features, dtype=torch.float32)
     adjacency_matrices = torch.tensor(adjacency_matrices, dtype=torch.float32)
-    labels =  torch.nn.functional.one_hot(torch.tensor(labels), len(Relationships))
+    labels =  torch.nn.functional.one_hot(torch.tensor(np.array(labels)), len(Relationships))
 
     return node_features, adjacency_matrices, labels
 
 
 def train_model(model, node_features, adjacency_matrices, labels, epochs=100, lr=0.1):
+    print(f"The epochs seen by the model are: {epochs}")
+    print(f"The lr seen by the model is: {lr}")
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
     with mlflow.start_run():
@@ -93,54 +88,7 @@ def train_model(model, node_features, adjacency_matrices, labels, epochs=100, lr
             loss.backward()
             optimizer.step()
             mlflow.log_metric("loss", loss.item(), step=epoch)
+            wandb.log({"loss": loss.item()})
             if epoch % 10 == 0:
                 print(f'Epoch {epoch + 1}, Loss: {loss.item()}')
         mlflow.pytorch.log_model(model, "models")
-
-
-# Create and train the GCN model
-if __name__ == "__main__":
-    mlflow.set_tracking_uri("http://192.168.1.94:8080")  # Set your MLflow tracking URI
-    mlflow.set_experiment("ecosystem_graphs")  # Set your MLflow experiment name
-
-    environment = EnvironmentGraph()
-
-
-    # Add 4 life forms to the graph with attributes
-    for i in range(1, 10):
-        position = (random.uniform(0, 10), random.uniform(0, 10))  # Random position within a 10x10 grid
-        speed = random.uniform(0, 10)
-        size = random.choice(list(Size))
-        diet = random.choice(list(Diet))
-        classification = random.choice(list(Classification)[:3])
-        environment.add_life_form(position, speed, size, diet, classification)
-
-    # Add 4 resources to the graph with attributes
-    for i in range(1, 10):
-        position = (random.uniform(0, 10), random.uniform(0, 10))  # Random position within a 10x10 grid
-        availability = random.uniform(0, 100)
-        environment.add_resource(position, availability)
-
-    # Add random interactions between entities
-    interactions = [(Relationships.CONSUMES, 50), (Relationships.PREDATORPREY, 50)]
-
-    for interaction, num in interactions:
-        for _ in range(num):
-            entity1_id = random.choice(list(environment.used_ids))
-            entity2_id = random.choice(list(environment.used_ids))
-            environment.add_interaction(entity1_id, entity2_id, interaction)
-
-    environment.visualize()
-    # Prepare data
-    node_features, adjacency_matrices, labels = prepare_data(environment)
-
-    # Define model and train
-    input_dim = 7  # Define input dimension based on node features
-    hidden_dim = 64  # Define hidden dimension
-    output_dim = 2  # Define output dimension (binary classification)
-    model = GCN(input_dim, hidden_dim, output_dim)
-    train_model(model, node_features, adjacency_matrices, labels)
-
-    mlflow.pytorch.log_model(model, "models")
-
-    mlflow.end_run()
