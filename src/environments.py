@@ -69,7 +69,7 @@ class EnvironmentGraph:
         pass
 
     def visualize(self):
-        pos = nx.spring_layout(self.graph, k=5)  # Define layout for visualization and adjust spacing
+        pos = nx.spring_layout(self.graph)  # Define layout for visualization and adjust spacing
         node_colors = []
         edge_labels = {}
 

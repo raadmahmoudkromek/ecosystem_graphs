@@ -1,94 +1,84 @@
-import mlflow
-import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import wandb
-from torch import nn as nn, optim as optim
-
-from src.attribute_enums import Relationships
+from torch_geometric.nn import GCNConv
 
 
-class GCN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+class GCN(torch.nn.Module):
+    def __init__(self, num_node_features, hidden_channels):
         super(GCN, self).__init__()
-        self.gc1 = GraphConvolution(input_dim, hidden_dim)
-        self.relu = nn.ReLU()
-        self.gc2 = GraphConvolution(hidden_dim, hidden_dim)
-        self.gc3 = GraphConvolution(hidden_dim, output_dim)
+        self.conv1 = GCNConv(num_node_features, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.fc = nn.Linear(2 * hidden_channels, 1)  # Adjusted output size for edge prediction
 
-    def forward(self, x, adj):
-        x = self.relu(self.gc1(x, adj))
-        x = self.relu(self.gc2(x, adj))
-        x = self.gc3(x, adj)
-        return x
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = self.conv2(x, edge_index)
+        x = F.relu(x)
+
+        # Gather source and target node embeddings
+        source = x[edge_index[0]]
+        target = x[edge_index[1]]
+
+        # Concatenate source and target embeddings to represent edges
+        edge_features = torch.cat([source, target], dim=-1)
+
+        # Pass edge features through linear layer for prediction
+        out = self.fc(edge_features).squeeze(1)
+        return torch.sigmoid(out)
 
 
-class GraphConvolution(nn.Module):
-    def __init__(self, input_dim, output_dim):
-        super(GraphConvolution, self).__init__()
-        self.linear = nn.Linear(input_dim, output_dim)
-
-    def forward(self, x, adj):
-        x = torch.matmul(adj, x)
-        x = self.linear(x)
-        return x
+import torch
+import numpy as np
+from torch_geometric.data import Data
 
 
 def prepare_data(environment):
     # Extract node features and adjacency matrix from EnvironmentGraph
     node_features = []
-    adjacency_matrices = []
+    edge_list = []
     labels = []
     id_to_index = {node_id: i for i, node_id in enumerate(environment.used_ids)}
-
-    max_feature_length = max(len(node_data) for node_data in environment.graph.nodes.values())
 
     for node_id, node_data in environment.graph.nodes(data=True):
         if node_data['type'] == 'life_form':
             position = node_data['position']
-            features = [position[0], position[1], node_data['classification'].value, node_data['speed'], node_data['size'].value, node_data['diet'].value, node_data['species'].value]
+            features = [position[0], position[1], node_data['classification'].value, node_data['speed'],
+                        node_data['size'].value, node_data['diet'].value, node_data['species'].value, 0]
         elif node_data['type'] == 'resource':
             position = node_data['position']
-            features = [position[0], position[1], node_data['availability']]
+            features = [position[0], position[1], 0, 0, 0, 0, 0, node_data['availability']]
         else:
             features = []  # Handle other types of nodes
 
-        # Pad features with zeros to ensure consistent length
-        padded_features = features + [0] * (max_feature_length - len(features))
-        node_features.append(padded_features)
-
-    node_features = np.array(node_features)  # Convert to NumPy array
+        node_features.append(features)
 
     for edge in environment.graph.edges(data=True):
         source_id, target_id, data = edge
-        adjacency_matrix = np.zeros((len(environment.graph.nodes()), len(environment.graph.nodes())))
         source_index = id_to_index[source_id]
         target_index = id_to_index[target_id]
-        adjacency_matrix[source_index][target_index] = 1
-        adjacency_matrices.append(adjacency_matrix)
+        edge_list.append([source_index, target_index])
         labels.append(data['relationship'].value)
 
     node_features = torch.tensor(node_features, dtype=torch.float32)
-    adjacency_matrices = torch.tensor(adjacency_matrices, dtype=torch.float32)
-    labels =  torch.nn.functional.one_hot(torch.tensor(np.array(labels)), len(Relationships))
+    edge_list = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+    labels = torch.tensor(np.array(labels), dtype=torch.long)
 
-    return node_features, adjacency_matrices, labels
+    data = Data(x=node_features, edge_index=edge_list, y=labels)
+    return data
 
 
-def train_model(model, node_features, adjacency_matrices, labels, epochs=100, lr=0.1):
-    print(f"The epochs seen by the model are: {epochs}")
-    print(f"The lr seen by the model is: {lr}")
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss()
-    with mlflow.start_run():
-        mlflow.log_params({"epochs": epochs, "lr": lr})
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            output = model(node_features, adjacency_matrices)
-            loss = criterion(output, labels)
-            loss.backward()
-            optimizer.step()
-            mlflow.log_metric("loss", loss.item(), step=epoch)
-            wandb.log({"loss": loss.item()})
-            if epoch % 10 == 0:
-                print(f'Epoch {epoch + 1}, Loss: {loss.item()}')
-        mlflow.pytorch.log_model(model, "models")
+def train(model, dataset, optimizer, criterion, epochs):
+    model.train()
+    for epoch in range(epochs):
+        running_loss = 0.0
+        optimizer.zero_grad()
+        out = model(dataset.x, dataset.edge_index)
+        loss = criterion(out, dataset.y.float())
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+        wandb.log({"loss": loss.item()})
+        print(f'Epoch {epoch + 1}/{epochs}, Loss: {running_loss}')

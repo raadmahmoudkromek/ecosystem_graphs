@@ -1,38 +1,47 @@
-#  Copyright (c) 2024. Kromek Group Ltd.
+import os
 import random
 
-import mlflow.pytorch
-
-from src.environments import EnvironmentGraph
+import torch
+import wandb
+from torch import nn
+from torch.optim import Adam
+from torch_geometric.data import DataLoader, Data
 
 from src.attribute_enums import Size, Classification, Diet, Relationships
-from src.graph_networks import GCN, prepare_data, train_model
+from src.environments import EnvironmentGraph
+from src.graph_networks import GCN, prepare_data, train
+from utils.general_utils import safe_load_yaml
 
 # Create and train the GCN model
 if __name__ == "__main__":
-    mlflow.set_tracking_uri("http://192.168.1.94:8080")  # Set your MLflow tracking URI
-    mlflow.set_experiment("ecosystem_graphs")  # Set your MLflow experiment name
+
+    hyperparam_defaults = safe_load_yaml(os.path.join('configs', 'network_config.yaml'))
+    data_gen_defaults = safe_load_yaml(os.path.join('configs', 'data_config.yaml'))
+
+    all_defaults = hyperparam_defaults | data_gen_defaults
+    wandb.init(project="ecosystem_graphs",
+               config=all_defaults)
+    config = wandb.config
 
     environment = EnvironmentGraph()
 
-
-    # Add 4 life forms to the graph with attributes
-    for i in range(1, 10):
-        position = (random.uniform(0, 10), random.uniform(0, 10))  # Random position within a 10x10 grid
-        speed = random.uniform(0, 10)
+    # Add life forms to the graph with attributes
+    for i in range(config.num_lifeforms):
+        position = (random.uniform(config.x_position['min'], config.x_position['max']), random.uniform(config.y_position['min'], config.y_position['max']))  # Random position within a 10x10 grid
+        speed = random.uniform(config.speed['min'], config.speed['max'])
         size = random.choice(list(Size))
         diet = random.choice(list(Diet))
         classification = random.choice(list(Classification)[:3])
         environment.add_life_form(position, speed, size, diet, classification)
 
-    # Add 4 resources to the graph with attributes
-    for i in range(1, 10):
-        position = (random.uniform(0, 10), random.uniform(0, 10))  # Random position within a 10x10 grid
-        availability = random.uniform(0, 100)
+    # Add resources to the graph with attributes
+    for i in range(config.num_resources):
+        position = (random.uniform(config.x_position['min'], config.x_position['max']), random.uniform(config.y_position['min'], config.y_position['max']))  # Random position within a 10x10 grid
+        availability = random.uniform(config.resource_availability['min'], config.resource_availability['max'])
         environment.add_resource(position, availability)
 
     # Add random interactions between entities
-    interactions = [(Relationships.CONSUMES, 50), (Relationships.PREDATORPREY, 50)]
+    interactions = [(Relationships.CONSUMES, config.num_interactions['consumes']), (Relationships.PREDATORPREY, config.num_interactions['predatorprey'])]
 
     for interaction, num in interactions:
         for _ in range(num):
@@ -40,26 +49,18 @@ if __name__ == "__main__":
             entity2_id = random.choice(list(environment.used_ids))
             environment.add_interaction(entity1_id, entity2_id, interaction)
 
-    environment.visualize()
+    if config.num_lifeforms+config.num_resources <= 100:
+        environment.visualize()
+
     # Prepare data
-    node_features, adjacency_matrices, labels = prepare_data(environment)
+    train_data = prepare_data(environment)
 
-    import wandb
-    # Define model and train
-    hyperparam_defaults = dict(
-        input_dim = 7,  # Define input dimension based on node features
-        hidden_dim = 64,  # Define hidden dimension
-        output_dim = 2,  # Define output dimension (binary classification)
-        epochs = 100,
-        lr = 0.1,
-    )
-    wandb.init(project="ecosystem_graphs",
-               config=hyperparam_defaults)
-    config = wandb.config
-    model = GCN(config.input_dim, config.hidden_dim, config.output_dim)
-    wandb.watch(model)
-    train_model(model, node_features, adjacency_matrices, labels, epochs=config.epochs, lr=config.lr)
+    # Instantiate the model
+    model = GCN(num_node_features=train_data.num_features, hidden_channels=64)
 
-    mlflow.pytorch.log_model(model, "models")
+    # Define loss function and optimizer
+    criterion = nn.BCELoss()
+    optimizer = Adam(model.parameters(), lr=config.lr)
 
-    mlflow.end_run()
+    # Train the model
+    train(model, train_data, optimizer, criterion, epochs=config.epochs)
